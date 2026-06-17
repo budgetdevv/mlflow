@@ -7,10 +7,7 @@
  */
 
 import type { OpenClawPluginApi, OpenClawPluginService } from 'openclaw/plugin-sdk/plugin-entry';
-import {
-  onDiagnosticEvent,
-  type DiagnosticEventPayload,
-} from 'openclaw/plugin-sdk/diagnostics-otel';
+import type { DiagnosticEventPayload } from 'openclaw/plugin-sdk/diagnostics-otel';
 import {
   init,
   startSpan,
@@ -796,7 +793,7 @@ export function createMLflowService(
     id: 'mlflow-tracing',
     registerHooks,
 
-    start(ctx) {
+    async start(ctx) {
       log = { info: ctx.logger.info.bind(ctx.logger), warn: ctx.logger.warn.bind(ctx.logger) };
       registerHooks();
 
@@ -814,43 +811,51 @@ export function createMLflowService(
         `mlflow: exporting traces to ${resolvedTrackingUri} (experiment=${resolvedExperimentId})`,
       );
 
-      const unsubDiagnostics = onDiagnosticEvent((evt: DiagnosticEventPayload) => {
-        if (evt.type !== 'model.usage') {
-          return;
-        }
+      let unsubDiagnostics: (() => void) | undefined;
+      try {
+        const { onDiagnosticEvent } = await import('openclaw/plugin-sdk/diagnostics-otel');
+        unsubDiagnostics = onDiagnosticEvent((evt: DiagnosticEventPayload) => {
+          if (evt.type !== 'model.usage') {
+            return;
+          }
 
-        const sessionKey = evt.sessionKey;
-        if (!sessionKey) {
-          return;
-        }
+          const sessionKey = evt.sessionKey;
+          if (!sessionKey) {
+            return;
+          }
 
-        const trace = activeTraces.get(sessionKey);
-        if (!trace) {
-          return;
-        }
+          const trace = activeTraces.get(sessionKey);
+          if (!trace) {
+            return;
+          }
 
-        trace.lastActivityMs = Date.now();
-        if (evt.usage) {
-          trace.tokenUsage.inputTokens += evt.usage.input || 0;
-          trace.tokenUsage.outputTokens += evt.usage.output || 0;
-          trace.tokenUsage.totalTokens += evt.usage.total || 0;
-        }
-        if (evt.costUsd != null) {
-          trace.costMeta.costUsd = (trace.costMeta.costUsd ?? 0) + evt.costUsd;
-        }
-        if (evt.context?.limit != null) {
-          trace.costMeta.contextLimit = evt.context.limit;
-        }
-        if (evt.context?.used != null) {
-          trace.costMeta.contextUsed = evt.context.used;
-        }
-        if (evt.model) {
-          trace.costMeta.model = evt.model;
-        }
-        if (evt.provider) {
-          trace.costMeta.provider = normalizeProvider(evt.provider) ?? evt.provider;
-        }
-      });
+          trace.lastActivityMs = Date.now();
+          if (evt.usage) {
+            trace.tokenUsage.inputTokens += evt.usage.input || 0;
+            trace.tokenUsage.outputTokens += evt.usage.output || 0;
+            trace.tokenUsage.totalTokens += evt.usage.total || 0;
+          }
+          if (evt.costUsd != null) {
+            trace.costMeta.costUsd = (trace.costMeta.costUsd ?? 0) + evt.costUsd;
+          }
+          if (evt.context?.limit != null) {
+            trace.costMeta.contextLimit = evt.context.limit;
+          }
+          if (evt.context?.used != null) {
+            trace.costMeta.contextUsed = evt.context.used;
+          }
+          if (evt.model) {
+            trace.costMeta.model = evt.model;
+          }
+          if (evt.provider) {
+            trace.costMeta.provider = normalizeProvider(evt.provider) ?? evt.provider;
+          }
+        });
+      } catch (err) {
+        log.warn(
+          `mlflow: OpenClaw diagnostics are unavailable; token and cost metadata will be omitted: ${String(err)}`,
+        );
+      }
 
       const sweepInterval = setInterval(() => {
         const now = Date.now();
@@ -868,7 +873,7 @@ export function createMLflowService(
       }, DEFAULT_STALE_SWEEP_INTERVAL_MS);
 
       cleanup = () => {
-        unsubDiagnostics();
+        unsubDiagnostics?.();
         clearInterval(sweepInterval);
       };
     },
